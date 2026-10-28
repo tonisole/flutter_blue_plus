@@ -1,3 +1,6 @@
+## Unreleased
+* Forward the caller's service discovery timeout to the platform implementation.
+
 ## 2.3.14
 * **[Fix]** Darwin: allow service discovery to finish when CoreBluetooth restricts access to a UUID, including Matter attributes (#1344)
 * **[LICENSE]** add global tier

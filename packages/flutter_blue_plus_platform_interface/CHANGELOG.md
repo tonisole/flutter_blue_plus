@@ -1,3 +1,6 @@
+## Unreleased
+* Add an optional service discovery timeout in seconds, defaulting to 15 for existing callers.
+
 ## 9.0.4
 * **[LICENSE]** add global tier
 

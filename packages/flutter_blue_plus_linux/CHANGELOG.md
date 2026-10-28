@@ -1,3 +1,6 @@
+## Unreleased
+* Release the global invocation lock while waiting for service discovery, with a caller-selected deadline and cleanup on disconnect, removal, or errors.
+
 ## 9.0.4
 * **[LICENSE]** add global tier
 

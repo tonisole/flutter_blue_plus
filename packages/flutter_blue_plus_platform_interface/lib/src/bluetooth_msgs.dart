@@ -411,8 +411,13 @@ class BmCharacteristicProperties {
 class BmDiscoverServicesRequest {
   DeviceIdentifier remoteId;
 
+  /// Service discovery timeout in seconds. Platforms without a discovery
+  /// deadline may continue to rely on the public Dart response timeout.
+  final int timeout;
+
   BmDiscoverServicesRequest({
     required this.remoteId,
+    this.timeout = 15,
   });
 }
 

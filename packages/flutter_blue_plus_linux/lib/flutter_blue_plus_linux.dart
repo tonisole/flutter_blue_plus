@@ -41,7 +41,15 @@ final class _LinuxFoundCharacteristic {
 }
 
 final class FlutterBluePlusLinux extends FlutterBluePlusPlatform {
-  final _client = BlueZClient();
+  final BlueZClient _client;
+
+  /// Uses [client] when supplied, or creates the default BlueZ client.
+  /// The caller retains ownership of an injected client's connection lifetime.
+  FlutterBluePlusLinux({BlueZClient? client}) : _client = client ?? BlueZClient();
+
+  // At most one finite discovery job per remote. The public SDK serializes
+  // operations per device; direct platform callers must also wait for a result.
+  final _discoveries = <DeviceIdentifier, _LinuxServiceDiscovery>{};
 
   var _initialized = false;
   var _logLevel = LogLevel.none;
@@ -401,6 +409,8 @@ final class FlutterBluePlusLinux extends FlutterBluePlusPlatform {
   ) async {
     await _initFlutterBluePlus();
 
+    unawaited(_discoveries[request.remoteId]?.finish(StateError('device disconnected')));
+
     final device = _client.devices.singleWhere(
       (device) {
         return device.remoteId == request.remoteId;
@@ -418,113 +428,122 @@ final class FlutterBluePlusLinux extends FlutterBluePlusPlatform {
   ) async {
     try {
       await _initFlutterBluePlus();
+    } catch (e) {
+      _onDiscoveredServicesController.add(_discoveryFailure(request.remoteId, e));
+      return false;
+    }
 
+    if (_discoveries.containsKey(request.remoteId)) {
+      throw StateError('service discovery already in progress for ${request.remoteId}');
+    }
+
+    try {
       final device = _client.devices.singleWhere(
         (device) {
           return device.remoteId == request.remoteId;
         },
       );
 
-      // Ensure BlueZ has completed service discovery before returning results
-      while (!device.servicesResolved) {
-        await Future.delayed(const Duration(milliseconds: 100));
-      }
-
-      _onDiscoveredServicesController.add(
-        BmDiscoverServicesResult(
-          remoteId: device.remoteId,
-          services: device.gattServices.map(
-            (service) {
-              return BmBluetoothService(
-                primaryServiceUuid: null,
-                serviceUuid: Guid.fromBytes(
-                  service.uuid.value,
-                ),
-                remoteId: device.remoteId,
-                characteristics: service.characteristics.map(
-                  (characteristic) {
-                    return BmBluetoothCharacteristic(
-                      remoteId: device.remoteId,
-                      primaryServiceUuid: null,
-                      serviceUuid: Guid.fromBytes(
-                        service.uuid.value,
-                      ),
-                      characteristicUuid: Guid.fromBytes(
-                        characteristic.uuid.value,
-                      ),
-                      instanceId: _instanceId(device, service, characteristic),
-                      descriptors: characteristic.descriptors.map(
-                        (descriptor) {
-                          return BmBluetoothDescriptor(
-                            remoteId: device.remoteId,
-                            primaryServiceUuid: null,
-                            serviceUuid: Guid.fromBytes(
-                              service.uuid.value,
-                            ),
-                            characteristicUuid: Guid.fromBytes(
-                              characteristic.uuid.value,
-                            ),
-                            instanceId: _instanceId(device, service, characteristic),
-                            descriptorUuid: Guid.fromBytes(
-                              descriptor.uuid.value,
-                            ),
-                          );
-                        },
-                      ).toList(),
-                      properties: BmCharacteristicProperties(
-                        broadcast: characteristic.flags.contains(
-                          BlueZGattCharacteristicFlag.broadcast,
-                        ),
-                        read: characteristic.flags.contains(
-                          BlueZGattCharacteristicFlag.read,
-                        ),
-                        writeWithoutResponse: characteristic.flags.contains(
-                          BlueZGattCharacteristicFlag.writeWithoutResponse,
-                        ),
-                        write: characteristic.flags.contains(
-                          BlueZGattCharacteristicFlag.write,
-                        ),
-                        notify: characteristic.flags.contains(
-                          BlueZGattCharacteristicFlag.notify,
-                        ),
-                        indicate: characteristic.flags.contains(
-                          BlueZGattCharacteristicFlag.indicate,
-                        ),
-                        authenticatedSignedWrites: characteristic.flags.contains(
-                          BlueZGattCharacteristicFlag.authenticatedSignedWrites,
-                        ),
-                        extendedProperties: characteristic.flags.contains(
-                          BlueZGattCharacteristicFlag.extendedProperties,
-                        ),
-                        notifyEncryptionRequired: false,
-                        indicateEncryptionRequired: false,
-                      ),
-                    );
-                  },
-                ).toList(),
-              );
-            },
-          ).toList(),
-          success: true,
-          errorCode: 0,
-          errorString: '',
-        ),
+      final job = _LinuxServiceDiscovery(
+        client: _client,
+        device: device,
+        timeout: Duration(seconds: request.timeout),
+        resolve: () => _discoveryResult(device),
+        onResult: (result) {
+          _discoveries.remove(request.remoteId);
+          _onDiscoveredServicesController.add(result);
+        },
       );
-
+      _discoveries[request.remoteId] = job;
+      job.start();
+      // Do not retain the public SDK's global invocation mutex while BlueZ
+      // resolves services. The job publishes its one response after cleanup.
       return true;
     } catch (e) {
-      _onDiscoveredServicesController.add(
-        BmDiscoverServicesResult(
-          remoteId: request.remoteId,
-          services: [],
-          success: false,
-          errorCode: 0,
-          errorString: '',
-        ),
-      );
-
+      _onDiscoveredServicesController.add(_discoveryFailure(request.remoteId, e));
       return false;
     }
+  }
+
+  BmDiscoverServicesResult _discoveryResult(BlueZDevice device) {
+    return BmDiscoverServicesResult(
+      remoteId: device.remoteId,
+      services: device.gattServices.map(
+        (service) {
+          return BmBluetoothService(
+            primaryServiceUuid: null,
+            serviceUuid: Guid.fromBytes(
+              service.uuid.value,
+            ),
+            remoteId: device.remoteId,
+            characteristics: service.characteristics.map(
+              (characteristic) {
+                return BmBluetoothCharacteristic(
+                  remoteId: device.remoteId,
+                  primaryServiceUuid: null,
+                  serviceUuid: Guid.fromBytes(
+                    service.uuid.value,
+                  ),
+                  characteristicUuid: Guid.fromBytes(
+                    characteristic.uuid.value,
+                  ),
+                  instanceId: _instanceId(device, service, characteristic),
+                  descriptors: characteristic.descriptors.map(
+                    (descriptor) {
+                      return BmBluetoothDescriptor(
+                        remoteId: device.remoteId,
+                        primaryServiceUuid: null,
+                        serviceUuid: Guid.fromBytes(
+                          service.uuid.value,
+                        ),
+                        characteristicUuid: Guid.fromBytes(
+                          characteristic.uuid.value,
+                        ),
+                        instanceId: _instanceId(device, service, characteristic),
+                        descriptorUuid: Guid.fromBytes(
+                          descriptor.uuid.value,
+                        ),
+                      );
+                    },
+                  ).toList(),
+                  properties: BmCharacteristicProperties(
+                    broadcast: characteristic.flags.contains(
+                      BlueZGattCharacteristicFlag.broadcast,
+                    ),
+                    read: characteristic.flags.contains(
+                      BlueZGattCharacteristicFlag.read,
+                    ),
+                    writeWithoutResponse: characteristic.flags.contains(
+                      BlueZGattCharacteristicFlag.writeWithoutResponse,
+                    ),
+                    write: characteristic.flags.contains(
+                      BlueZGattCharacteristicFlag.write,
+                    ),
+                    notify: characteristic.flags.contains(
+                      BlueZGattCharacteristicFlag.notify,
+                    ),
+                    indicate: characteristic.flags.contains(
+                      BlueZGattCharacteristicFlag.indicate,
+                    ),
+                    authenticatedSignedWrites: characteristic.flags.contains(
+                      BlueZGattCharacteristicFlag.authenticatedSignedWrites,
+                    ),
+                    extendedProperties: characteristic.flags.contains(
+                      BlueZGattCharacteristicFlag.extendedProperties,
+                    ),
+                    notifyEncryptionRequired: false,
+                    indicateEncryptionRequired: false,
+                  ),
+                );
+              },
+            ).toList(),
+          );
+        },
+      ).toList(),
+      success: true,
+      errorCode: 0,
+      errorString: '',
+    );
   }
 
   @override
@@ -1122,6 +1141,123 @@ final class FlutterBluePlusLinux extends FlutterBluePlusPlatform {
         );
       },
     ).listen(null);
+  }
+}
+
+BmDiscoverServicesResult _discoveryFailure(DeviceIdentifier remoteId, Object error) {
+  return BmDiscoverServicesResult(
+    remoteId: remoteId,
+    services: [],
+    success: false,
+    errorCode: 0,
+    errorString: error.toString(),
+  );
+}
+
+/// Owns one discovery deadline and two subscriptions until one terminal result.
+/// Once finishing starts, queued events cannot resolve or retire the job again.
+final class _LinuxServiceDiscovery {
+  final BlueZClient client;
+  final BlueZDevice device;
+  final Duration timeout;
+  final BmDiscoverServicesResult Function() resolve;
+  final void Function(BmDiscoverServicesResult) onResult;
+  final Stream<List<String>> _properties;
+  StreamSubscription<List<String>>? _propertySubscription;
+  StreamSubscription<BlueZDevice>? _removalSubscription;
+  Timer? _timer;
+  bool _finished = false;
+  Object? _error;
+
+  _LinuxServiceDiscovery({
+    required this.client,
+    required this.device,
+    required this.timeout,
+    required this.resolve,
+    required this.onResult,
+  }) : _properties = device.propertiesChanged;
+
+  void start() {
+    try {
+      _timer = Timer(timeout, () => unawaited(finish(TimeoutException('service discovery timed out', timeout))));
+      _removalSubscription = client.deviceRemoved.listen(
+        (removed) {
+          if (removed.remoteId == device.remoteId) {
+            unawaited(finish(StateError('device removed')));
+          }
+        },
+        onError: (Object error) => unawaited(finish(error)),
+        onDone: () => unawaited(finish(StateError('device removal stream closed'))),
+      );
+      _propertySubscription = _properties.listen(
+        (properties) {
+          // A Connected change can represent a disconnect/reconnect whose
+          // cached value is already true again. Never reuse that old session.
+          if (properties.contains('Connected')) {
+            unawaited(finish(StateError('device connection changed')));
+          } else {
+            _check();
+          }
+        },
+        onError: (Object error) => unawaited(finish(error)),
+        onDone: () => unawaited(finish(StateError('device property stream closed'))),
+      );
+      _check();
+    } catch (e) {
+      unawaited(finish(e));
+    }
+  }
+
+  bool get _isCurrentSession {
+    // BlueZClient.devices creates fresh device wrappers on every read. The
+    // property stream belongs to the underlying BlueZ object, not its address;
+    // a removed/re-added object at the same address has a different stream.
+    return device.connected &&
+        client.devices.any(
+          (current) => current.remoteId == device.remoteId && identical(current.propertiesChanged, _properties),
+        );
+  }
+
+  void _check() {
+    if (_finished) return;
+    try {
+      if (!_isCurrentSession) {
+        unawaited(finish(StateError('device disconnected or removed')));
+      } else if (device.servicesResolved) {
+        unawaited(finish());
+      }
+    } catch (e) {
+      unawaited(finish(e));
+    }
+  }
+
+  Future<void> finish([Object? error]) async {
+    // An explicit disconnect during asynchronous cleanup still invalidates a
+    // pending success, even before BlueZ updates its cached Connected value.
+    _error ??= error;
+    if (_finished) return;
+    _finished = true;
+    _timer?.cancel();
+    try {
+      await Future.wait([
+        if (_propertySubscription != null) Future.sync(_propertySubscription!.cancel),
+        if (_removalSubscription != null) Future.sync(_removalSubscription!.cancel),
+      ]);
+    } catch (e) {
+      _error ??= e;
+    }
+
+    BmDiscoverServicesResult result;
+    try {
+      if (_error != null) throw _error!;
+      if (!_isCurrentSession || !device.servicesResolved) {
+        throw StateError('device discovery session ended');
+      }
+      result = resolve();
+    } catch (e) {
+      result = _discoveryFailure(device.remoteId, e);
+    }
+    onResult(result);
   }
 }
 

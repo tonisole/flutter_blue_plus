@@ -279,8 +279,8 @@ class BluetoothDevice {
       Future<BmDiscoverServicesResult> futureResponse = responseStream.first;
 
       // invoke
-      await FlutterBluePlus._invokePlatform(
-          () => FlutterBluePlusPlatform.instance.discoverServices(BmDiscoverServicesRequest(remoteId: remoteId)));
+      await FlutterBluePlus._invokePlatform(() => FlutterBluePlusPlatform.instance
+          .discoverServices(BmDiscoverServicesRequest(remoteId: remoteId, timeout: timeout)));
 
       // wait for response
       BmDiscoverServicesResult response = await futureResponse
