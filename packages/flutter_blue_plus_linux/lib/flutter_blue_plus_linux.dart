@@ -16,11 +16,12 @@ extension on BlueZGattCharacteristic {
     var idx = 0;
     for (final c in service.characteristics) {
       if (Guid.fromBytes(c.uuid.value) == target) {
-        if (identical(c, this)) return idx;
+        // BlueZ recreates wrappers, but their cached object's stream stays equal.
+        if (c.propertiesChanged == propertiesChanged) return idx;
         idx++;
       }
     }
-    return 0;
+    throw StateError('characteristic not found in service: $target');
   }
 }
 
@@ -41,7 +42,10 @@ final class _LinuxFoundCharacteristic {
 }
 
 final class FlutterBluePlusLinux extends FlutterBluePlusPlatform {
-  final _client = BlueZClient();
+  /// Creates a Linux plugin, optionally using an existing BlueZ client.
+  FlutterBluePlusLinux({BlueZClient? bluezClient}) : _client = bluezClient ?? BlueZClient();
+
+  final BlueZClient _client;
 
   var _initialized = false;
   var _logLevel = LogLevel.none;
@@ -67,14 +71,14 @@ final class FlutterBluePlusLinux extends FlutterBluePlusPlatform {
     var idx = 0;
     for (final candidateService in services) {
       for (final characteristic in candidateService.characteristics) {
-        if (identical(characteristic, target)) {
+        if (characteristic.propertiesChanged == target.propertiesChanged) {
           return idx;
         }
         idx++;
       }
     }
 
-    return 0;
+    throw StateError('characteristic not found in services: ${target.uuid}');
   }
 
   _LinuxFoundCharacteristic _findCharacteristic(

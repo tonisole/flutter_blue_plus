@@ -1,3 +1,6 @@
+## Unreleased
+* **[Fix]** Linux: preserve characteristic instance IDs across BlueZ wrapper re-enumeration
+
 ## 9.0.4
 * **[LICENSE]** add global tier
 
