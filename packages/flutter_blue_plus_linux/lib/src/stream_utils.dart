@@ -71,26 +71,81 @@ extension StreamUtils<T> on Stream<T> {
       (controller) {
         StreamSubscription<T>? outerSubscription;
         StreamSubscription<S>? innerSubscription;
+        Future<void>? innerCancellation;
         var outerDone = false;
         var isCanceled = false;
+        var isSwitching = false;
+        var generation = 0;
 
-        Future<void> closeIfDone() async {
-          if (!isCanceled && outerDone && innerSubscription == null) {
+        void closeIfDone() {
+          if (!isCanceled && outerDone && !isSwitching && innerSubscription == null) {
             controller.close();
           }
         }
 
         outerSubscription = listen(
           (event) async {
-            await innerSubscription?.cancel();
-            innerSubscription = mapper(event).listen(
-              controller.add,
-              onError: controller.addError,
-              onDone: () {
-                innerSubscription = null;
+            final current = ++generation;
+            isSwitching = true;
+            try {
+              // Detach once, but let every replacement await the same cleanup.
+              final previous = innerSubscription;
+              innerSubscription = null;
+              if (previous != null) {
+                // Publish before cancel can synchronously reenter onCancel.
+                final pendingCancellation = Completer<void>();
+                innerCancellation = pendingCancellation.future;
+                pendingCancellation.complete(Future<void>.sync(previous.cancel));
+              }
+              final cancellation = innerCancellation;
+              try {
+                await cancellation;
+              } finally {
+                if (identical(innerCancellation, cancellation)) innerCancellation = null;
+              }
+              if (isCanceled || current != generation) return;
+
+              final stream = mapper(event);
+              if (isCanceled || current != generation) return;
+              // Publish ownership before onListen can reenter, including any
+              // cleanup needed if this listen is canceled or superseded.
+              final pendingListen = Completer<void>();
+              innerCancellation = pendingListen.future;
+              try {
+                var innerDone = false;
+                final subscription = stream.listen(
+                  controller.add,
+                  onError: controller.addError,
+                  onDone: () {
+                    innerDone = true;
+                    if (current != generation) return;
+                    innerSubscription = null;
+                    closeIfDone();
+                  },
+                );
+                if (isCanceled || current != generation) {
+                  pendingListen.complete(subscription.cancel());
+                } else {
+                  if (!innerDone) innerSubscription = subscription;
+                  pendingListen.complete();
+                }
+              } catch (error, stack) {
+                pendingListen.completeError(error, stack);
+              }
+              try {
+                await pendingListen.future;
+              } finally {
+                if (identical(innerCancellation, pendingListen.future)) innerCancellation = null;
+              }
+            } catch (error, stack) {
+              // Stream.listen does not await this callback's future.
+              if (!isCanceled && current == generation) controller.addError(error, stack);
+            } finally {
+              if (current == generation) {
+                isSwitching = false;
                 closeIfDone();
-              },
-            );
+              }
+            }
           },
           onError: controller.addError,
           onDone: () {
@@ -101,8 +156,14 @@ extension StreamUtils<T> on Stream<T> {
 
         controller.onCancel = () async {
           isCanceled = true;
-          await innerSubscription?.cancel();
-          await outerSubscription?.cancel();
+          generation++;
+          final inner = innerSubscription;
+          innerSubscription = null;
+          try {
+            await (inner?.cancel() ?? innerCancellation);
+          } finally {
+            await outerSubscription?.cancel();
+          }
         };
       },
       isBroadcast: true,

@@ -1,3 +1,6 @@
+## Unreleased
+* **[Fix]** Linux: prevent stale `switchMap` subscriptions and correctly forward switch errors and completion
+
 ## 9.0.4
 * **[LICENSE]** add global tier
 
